@@ -213,4 +213,101 @@ final class ModelComparisonTests: XCTestCase {
         XCTAssertTrue(results.isEmpty)
         XCTAssertTrue(shelf.builds.isEmpty, "no engine is built for a cancelled comparison")
     }
+
+    // MARK: - Differences
+
+    private func spans(_ texts: [String]) -> [[String]] {
+        zip(texts, ModelComparisonDiff.differingSpans(in: texts)).map { text, ranges in
+            ranges.map { String(text[$0]) }
+        }
+    }
+
+    /// The first real comparison: only the brand name came out differently.
+    func testDiffFindsTheOneWordTheModelsDisagreeOn() {
+        let giga = "Смотри, можно ли из этого видео достать всю полезную информацию и могу ли я на практике "
+            + "применить это у себя на своем ноутбуке в данном случае на макбуке и на своем ноутбуке."
+        let parakeet = "Смотри, можно ли из этого видео достать всю полезную информацию, и могу ли я на практике "
+            + "применить это у себя на своем ноутбуке? В данном случае на MacBookie и на своем ноутбуке"
+
+        XCTAssertEqual(spans([giga, parakeet]), [["макбуке"], ["MacBookie"]])
+    }
+
+    func testDiffIgnoresCasePunctuationAndYo() {
+        XCTAssertEqual(spans(["Ещё раз, Привет!", "еще раз привет"]), [[], []])
+    }
+
+    func testDiffMergesNeighbouringWordsIntoOneSpan() {
+        XCTAssertEqual(
+            spans(["я открыл ноутбук вчера", "я закрыл свой ноутбук вчера"]),
+            [["открыл"], ["закрыл свой"]]
+        )
+    }
+
+    /// A word one model got differently is marked in every text, so each
+    /// text shows where the models disagree.
+    func testDiffMarksAWordThatDiffersFromAnyOtherModel() {
+        XCTAssertEqual(
+            spans(["one two three", "one two three", "one too three"]),
+            [["two"], ["two"], ["too"]]
+        )
+    }
+
+    func testDisplayReportHighlightsTheDifferingWords() throws {
+        let parakeet = try model("parakeet-tdt-0.6b-v3")
+        let giga = try model("gigaam-v3-e2e-rnnt")
+        let results = [
+            ModelComparisonResult(
+                model: parakeet, isCurrent: true, language: nil, languageFellBack: false,
+                loadSeconds: nil, transcribeSeconds: 1,
+                outcome: .transcribed(text: "на MacBookie и ноутбуке", incomplete: false)
+            ),
+            ModelComparisonResult(
+                model: giga, isCurrent: false, language: nil, languageFellBack: false,
+                loadSeconds: 1, transcribeSeconds: 1,
+                outcome: .transcribed(text: "на макбуке и ноутбуке", incomplete: false)
+            ),
+        ]
+
+        let display = ModelComparisonReport.render(
+            date: Date(timeIntervalSince1970: 0),
+            audioSeconds: 10,
+            requestedLanguage: nil,
+            results: results,
+            style: .display
+        )
+        let text = display.text as NSString
+        XCTAssertEqual(display.highlights.map { text.substring(with: $0) }, ["MacBookie", "макбуке"])
+        XCTAssertTrue(display.text.contains("Highlighted words differ between models."), display.text)
+        XCTAssertFalse(display.text.contains("**"), display.text)
+
+        let markdown = ModelComparisonReport.markdown(
+            date: Date(timeIntervalSince1970: 0),
+            audioSeconds: 10,
+            requestedLanguage: nil,
+            results: results
+        )
+        XCTAssertTrue(markdown.contains("на **MacBookie** и ноутбуке"), markdown)
+        XCTAssertTrue(markdown.contains("на **макбуке** и ноутбуке"), markdown)
+        XCTAssertTrue(markdown.contains("Words in **bold** differ between models."), markdown)
+    }
+
+    func testReportSaysWhenEveryModelHeardTheSameWords() throws {
+        let results = try ["parakeet-tdt-0.6b-v3", "gigaam-v3-e2e-rnnt"].map { variant in
+            ModelComparisonResult(
+                model: try model(variant), isCurrent: false, language: nil, languageFellBack: false,
+                loadSeconds: 1, transcribeSeconds: 1,
+                outcome: .transcribed(text: variant == "gigaam-v3-e2e-rnnt" ? "Привет, мир." : "привет мир", incomplete: false)
+            )
+        }
+
+        let display = ModelComparisonReport.render(
+            date: Date(timeIntervalSince1970: 0),
+            audioSeconds: 10,
+            requestedLanguage: nil,
+            results: results,
+            style: .display
+        )
+        XCTAssertTrue(display.highlights.isEmpty)
+        XCTAssertTrue(display.text.contains("All models recognized the same words"), display.text)
+    }
 }

@@ -2999,6 +2999,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let models = comparisonModels()
         let language = transcriber.preferredLanguage
         let date = Date()
+        func report(
+            _ results: [ModelComparisonResult],
+            running: WhisperModel? = nil,
+            waiting: [WhisperModel] = [],
+            style: ModelComparisonReport.Style = .display
+        ) -> ModelComparisonReport.Rendered {
+            ModelComparisonReport.render(
+                date: date,
+                audioSeconds: audio.duration,
+                requestedLanguage: language,
+                results: results,
+                running: running,
+                waiting: waiting,
+                style: style
+            )
+        }
 
         comparisonWindow?.onClose = nil
         comparisonWindow?.close()
@@ -3006,13 +3022,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         comparisonWindow = window
         window.onClose = { [weak self] in self?.comparisonTask?.cancel() }
         window.update(
-            report: ModelComparisonReport.markdown(
-                date: date,
-                audioSeconds: audio.duration,
-                requestedLanguage: language,
-                results: [],
-                waiting: models
-            ),
+            report: report([], waiting: models),
             status: "Comparing \(models.count) models…"
         )
         window.show()
@@ -3029,30 +3039,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     model != running && !results.contains { $0.model == model }
                 }
                 window.update(
-                    report: ModelComparisonReport.markdown(
-                        date: date,
-                        audioSeconds: audio.duration,
-                        requestedLanguage: language,
-                        results: results,
-                        running: running,
-                        waiting: waiting
-                    ),
+                    report: report(results, running: running, waiting: waiting),
                     status: running.map { "Running \($0.displayName)…" } ?? "Done"
                 )
             }
             let cancelled = Task.isCancelled
             self.comparisonTask = nil
             self.refreshRuntimeMutationMenus()
-            let report = ModelComparisonReport.markdown(
-                date: date,
-                audioSeconds: audio.duration,
-                requestedLanguage: language,
-                results: results
-            )
             if cancelled {
-                window.update(report: report, status: "Cancelled")
+                window.update(report: report(results), status: "Cancelled")
             } else {
-                window.finish(report: report, savedURL: ModelComparisonStore.save(report, date: date))
+                window.finish(
+                    report: report(results),
+                    savedURL: ModelComparisonStore.save(report(results, style: .markdown).text, date: date)
+                )
             }
         }
         refreshRuntimeMutationMenus()
