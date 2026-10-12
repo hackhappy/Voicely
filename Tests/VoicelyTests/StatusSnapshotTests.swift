@@ -4,18 +4,16 @@ import XCTest
 @testable import VoicelyCore
 
 final class StatusSnapshotTests: XCTestCase {
-    /// The catalog shrank to Parakeet only (owner's call, 2026-08-19). A user
-    /// upgrading from an older release still has a retired variant persisted;
-    /// it must read as "no selection" so the app falls back to the
-    /// recommendation instead of resurrecting a model the catalog no longer
-    /// carries.
+    /// A persisted variant the catalog does not carry (here Whisper "small",
+    /// which no release shipped) must read as "no selection" so the app falls
+    /// back to the recommendation instead of resurrecting an unknown model.
     func testStaleSavedVariantReadsAsNoSelection() {
         let defaults = UserDefaults(suiteName: #function)!
         defaults.removePersistentDomain(forName: #function)
         defer {
             defaults.removePersistentDomain(forName: #function)
         }
-        defaults.set("gigaam-v3-e2e-rnnt", forKey: "whisperModel")
+        defaults.set("small", forKey: "whisperModel")
 
         let recommended = WhisperModel.all[0]
         let snapshot = StatusSnapshot.gather(
@@ -29,7 +27,7 @@ final class StatusSnapshotTests: XCTestCase {
                 patchVersion: 0
             ),
             fileExists: { path in
-                path.contains("v3-e2e-rnnt")
+                path.contains("openai_whisper-small")
             }
         )
 

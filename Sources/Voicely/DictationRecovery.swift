@@ -85,8 +85,10 @@ final class DictationRecoveryStore: @unchecked Sendable {
             in: .userDomainMask
         ).first ?? FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support", isDirectory: true)
+        // Voicely Lab's own folder: an official Voicely running alongside
+        // must never see the other's in-flight capture as an orphan.
         return support
-            .appendingPathComponent("Voicely", isDirectory: true)
+            .appendingPathComponent("Voicely Lab", isDirectory: true)
             .appendingPathComponent("PendingDictations", isDirectory: true)
     }
 

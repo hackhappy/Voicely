@@ -75,7 +75,10 @@ protocol SessionLanguageResettable: Sendable {
 
 public struct WhisperModel: Sendable, Equatable {
     enum SharedDefaults {
-        static let suiteName = "art.voicely.app"
+        /// Voicely Lab keeps its own settings, so picking a model here never
+        /// moves the model of an official Voicely installed alongside.
+        /// Model files are shared: their paths do not depend on this suite.
+        static let suiteName = "art.voicely.lab"
         static var store: UserDefaults {
             UserDefaults(suiteName: suiteName) ?? .standard
         }
@@ -172,12 +175,16 @@ public struct WhisperModel: Sendable, Equatable {
         return nil
     }
 
-    /// The whole line-up is one model — the owner's call (2026-08-19) after
-    /// living with Parakeet: "оставим только её". Engines for the retired
-    /// models stay in the codebase as data-less code until a separate removal
-    /// pass; re-adding a model is a data change here, not a code change.
+    /// Upstream Voicely ships Parakeet alone (owner's call, 2026-08-19).
+    /// Voicely Lab brings back the 1.2.0 line-up so the models can be tried
+    /// and compared side by side; Parakeet stays the recommendation.
     public static let all: [WhisperModel] = [
         WhisperModel(variant: "parakeet-tdt-0.6b-v3", displayName: "Parakeet V3", sizeLabel: "~470 MB", sizeBytes: 500_000_000, minRAMGB: 8, backend: .parakeetTDTV3),
+        WhisperModel(variant: "gigaam-v3-e2e-rnnt", displayName: "GigaAM V3 RU", sizeLabel: "~426 MB", sizeBytes: 430_000_000, minRAMGB: 8, backend: .gigaAMV3E2ERNNT),
+        WhisperModel(variant: "gigaam-multilingual-ctc", displayName: "GigaAM Multilingual", sizeLabel: "~421 MB", sizeBytes: 442_100_000, minRAMGB: 8, backend: .gigaAMMultilingualCTC),
+        WhisperModel(variant: "large-v3-v20240930_turbo_632MB", displayName: "Large V3 Turbo Q", sizeLabel: "~632 MB", sizeBytes: 650_000_000, minRAMGB: 8, backend: .whisperKit),
+        WhisperModel(variant: "large-v3_turbo", displayName: "Large V3 Turbo", sizeLabel: "~3 GB", sizeBytes: 3_200_000_000, minRAMGB: 24, backend: .whisperKit),
+        WhisperModel(variant: "medium", displayName: "Medium", sizeLabel: "~1.5 GB", sizeBytes: 1_500_000_000, minRAMGB: 16, backend: .whisperKit),
     ]
 
     public static var systemRAMGB: UInt64 {
@@ -312,6 +319,49 @@ public struct WhisperModel: Sendable, Equatable {
 
     static func clearSavedSelection(in defaults: UserDefaults) {
         defaults.removeObject(forKey: "whisperModel")
+    }
+
+    // MARK: Installed models
+
+    private static let installedVariantsKey = "installedModelVariants"
+
+    /// Whether this model finished loading here at least once and its folder
+    /// is still on disk. A folder alone is not enough: an interrupted
+    /// download leaves one behind. Lets the menu switch to the model without
+    /// a download prompt and lets a comparison skip models that would start
+    /// a download.
+    public var isInstalled: Bool {
+        isInstalled(in: SharedDefaults.store)
+    }
+
+    func isInstalled(in defaults: UserDefaults) -> Bool {
+        Self.installedVariants(in: defaults).contains(variant)
+            && FileManager.default.fileExists(atPath: modelDirectory.path)
+    }
+
+    static func installedVariants(in defaults: UserDefaults) -> Set<String> {
+        Set(defaults.stringArray(forKey: installedVariantsKey) ?? [])
+    }
+
+    static func setInstalled(_ installed: Bool, variant: String, in defaults: UserDefaults) {
+        var variants = installedVariants(in: defaults)
+        if installed {
+            variants.insert(variant)
+        } else {
+            variants.remove(variant)
+        }
+        defaults.set(variants.sorted(), forKey: installedVariantsKey)
+    }
+
+    /// Delete this model's files and forget it was installed. For a model
+    /// that is not loaded; the selected one goes through
+    /// `Transcriber.cancelAndCleanup(model:)`.
+    public func removeFromDisk() {
+        Self.setInstalled(false, variant: variant, in: SharedDefaults.store)
+        let dir = modelDirectory
+        guard FileManager.default.fileExists(atPath: dir.path) else { return }
+        vlog("Deleting model directory: \(dir.path)")
+        try? FileManager.default.removeItem(at: dir)
     }
 
     /// Resolve model storage without consulting the process working directory.
@@ -464,6 +514,10 @@ public final class Transcriber {
 
     public var onProgress: (@Sendable (TranscriberStatus) -> Void)?
 
+    /// Where installed models are recorded (`WhisperModel.isInstalled`).
+    /// Nil for a transcriber built on fake engines, which installs nothing.
+    private let installedModelsStore: UserDefaults?
+
     public init(
         locale: Locale = .current,
         coordinator: TranscriptionCoordinator = TranscriptionCoordinator()
@@ -472,6 +526,7 @@ public final class Transcriber {
         self.coordinator = coordinator
         self.engineFactory = Self.makeProductionEngine
         self.selectedModel = WhisperModel.savedSelection() ?? WhisperModel.recommended()
+        self.installedModelsStore = WhisperModel.SharedDefaults.store
     }
 
     init(
@@ -484,6 +539,7 @@ public final class Transcriber {
         self.coordinator = coordinator
         self.engineFactory = engineFactory
         self.selectedModel = selectedModel
+        self.installedModelsStore = nil
     }
 
     public var hasSavedModelSelection: Bool {
@@ -515,6 +571,38 @@ public final class Transcriber {
         for session: TranscriptionSession
     ) -> any SampleTranscribing {
         CoordinatedSampleTranscriber(session: session)
+    }
+
+    /// A background session on `model` for a side-by-side model comparison.
+    ///
+    /// The selected model reuses its loaded engine. Any other model gets an
+    /// engine of its own, built without the progress callback that drives the
+    /// model menu, and freed together with the session — so at most one extra
+    /// model sits in memory. A language the model cannot take falls back to
+    /// auto-detection rather than failing the run.
+    public func makeComparisonSession(
+        for model: WhisperModel,
+        language: String?
+    ) -> TranscriptionSession {
+        let engine = model == selectedModel ? resolveEngine() : engineFactory(model, nil)
+        let languageFits = model.requestValidationError(
+            translateToEnglish: false,
+            language: language
+        ) == nil
+        return TranscriptionSession(
+            id: TranscriptionCoordinator.SessionID(),
+            priority: .background,
+            model: model,
+            translateToEnglish: false,
+            preferredLanguage: languageFits ? language : nil,
+            engine: engine,
+            coordinator: coordinator
+        )
+    }
+
+    /// Stop whatever `session`'s engine is loading or decoding.
+    public func cancel(_ session: TranscriptionSession) {
+        (session.engine as? any CancelableTranscriberEngine)?.cancel()
     }
 
     /// Change model. Resets engine so next transcription downloads/loads new model.
@@ -607,6 +695,9 @@ public final class Transcriber {
     /// the user picked next, not the one they cancelled.
     public func cancelAndCleanup(model: WhisperModel) {
         cancelCurrentTask()
+        if let installedModelsStore {
+            WhisperModel.setInstalled(false, variant: model.variant, in: installedModelsStore)
+        }
         // Delete partial model files
         let dir = model.modelDirectory
         if FileManager.default.fileExists(atPath: dir.path) {
@@ -648,6 +739,9 @@ public final class Transcriber {
                 priority: .background
             ) {
                 try await preloadable.preload()
+            }
+            if let installedModelsStore {
+                WhisperModel.setInstalled(true, variant: session.model.variant, in: installedModelsStore)
             }
             vlog("Model preloaded successfully")
         } catch {
@@ -888,6 +982,7 @@ public final class Transcriber {
     /// non-isolated WhisperKitEngine load path can call it after a proven
     /// corruption (Fix 1.2) without hopping to the main actor.
     nonisolated static func deleteModelDirectory(for model: WhisperModel) {
+        WhisperModel.setInstalled(false, variant: model.variant, in: WhisperModel.SharedDefaults.store)
         let dir = model.modelDirectory
         guard FileManager.default.fileExists(atPath: dir.path) else { return }
         vlog("Deleting corrupted model directory: \(dir.path)")

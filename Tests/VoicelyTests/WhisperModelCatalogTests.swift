@@ -2,24 +2,68 @@ import XCTest
 @testable import VoicelyCore
 
 final class WhisperModelCatalogTests: XCTestCase {
-    /// The whole line-up is one model — the owner's call (2026-08-19).
-    /// Re-adding a model must be a deliberate data change reflected here.
+    /// Voicely Lab carries the 1.2.0 line-up so the models can be compared.
+    /// Adding or dropping a model must be a deliberate data change reflected here.
     func testCatalogMatchesRequestedProductLine() {
         XCTAssertEqual(
             WhisperModel.all.map(\.variant),
-            ["parakeet-tdt-0.6b-v3"]
+            [
+                "parakeet-tdt-0.6b-v3",
+                "gigaam-v3-e2e-rnnt",
+                "gigaam-multilingual-ctc",
+                "large-v3-v20240930_turbo_632MB",
+                "large-v3_turbo",
+                "medium",
+            ]
         )
     }
 
     func testAvailabilityFollowsRAMThresholds() {
+        let light = [
+            "parakeet-tdt-0.6b-v3",
+            "gigaam-v3-e2e-rnnt",
+            "gigaam-multilingual-ctc",
+            "large-v3-v20240930_turbo_632MB",
+        ]
+        XCTAssertEqual(WhisperModel.available(forSystemRAMGB: 8).map(\.variant), light)
         XCTAssertEqual(
-            WhisperModel.available(forSystemRAMGB: 8).map(\.variant),
-            ["parakeet-tdt-0.6b-v3"]
+            WhisperModel.available(forSystemRAMGB: 16).map(\.variant),
+            light + ["medium"]
         )
         XCTAssertEqual(
             WhisperModel.available(forSystemRAMGB: 24).map(\.variant),
-            ["parakeet-tdt-0.6b-v3"]
+            WhisperModel.all.map(\.variant)
         )
+    }
+
+    func testInstalledVariantsAreRecordedPerVariant() throws {
+        let suite = "WhisperModelCatalogTests.\(#function)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defaults.removePersistentDomain(forName: suite)
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        WhisperModel.setInstalled(true, variant: "medium", in: defaults)
+        WhisperModel.setInstalled(true, variant: "gigaam-v3-e2e-rnnt", in: defaults)
+        WhisperModel.setInstalled(true, variant: "medium", in: defaults)
+        XCTAssertEqual(
+            WhisperModel.installedVariants(in: defaults),
+            ["medium", "gigaam-v3-e2e-rnnt"]
+        )
+
+        WhisperModel.setInstalled(false, variant: "medium", in: defaults)
+        XCTAssertEqual(WhisperModel.installedVariants(in: defaults), ["gigaam-v3-e2e-rnnt"])
+    }
+
+    /// A folder left by an interrupted download is not an installed model.
+    func testModelIsNotInstalledUntilRecorded() throws {
+        let suite = "WhisperModelCatalogTests.\(#function)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defaults.removePersistentDomain(forName: suite)
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        for model in WhisperModel.all {
+            XCTAssertFalse(model.isInstalled(in: defaults), model.variant)
+        }
     }
 
     func testRecommendationIsParakeetOnEveryTier() {

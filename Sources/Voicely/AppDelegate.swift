@@ -372,6 +372,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var dictationChunkSessionID: UUID?
     /// Windows the chunk loop handed to ASR this session; tells a drained tail apart from a mic that never delivered.
     private var dictationChunksDecoded = 0
+    /// Audio of the dictation in progress, collected for "Compare Models".
+    private var dictationAudioCapture = DictationAudioCapture()
+    /// Audio of the last dictation that produced text. Memory only.
+    private var lastDictationAudio: DictationAudioSnapshot?
+    private var comparisonTask: Task<Void, Never>?
+    private var comparisonWindow: ModelComparisonWindowController?
+    /// File transcription or a model comparison: either one is using the
+    /// engine, so the model and language must not change under it.
+    private var backgroundWorkActive: Bool { fileWorkActive || comparisonTask != nil }
     /// Token of the model-setup pill; its watchdog and the progress callback
     /// address that session only, never whatever pill came after it. Written
     /// by `beginModelSetupPill` only.
@@ -747,7 +756,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let locked = modelReady  // Single source of truth: modelState == .ready
         let mutationLocked = !Self.runtimeMutationsAllowed(
             appState: state,
-            fileWorkActive: fileWorkActive
+            fileWorkActive: backgroundWorkActive
         )
 
         guard !available.isEmpty else {
@@ -759,22 +768,52 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // Voicely Lab: every model stays selectable. A downloaded one is a
+        // switch; any other asks before it downloads.
         for model in available {
             var label = model.userFacingLabel(isRecommended: model == recommended)
             let isSelected = current == model
-            if isSelected && locked { label += "  [ready]" }
+            if isSelected && locked {
+                label += "  [ready]"
+            } else if model.isInstalled {
+                label += "  [downloaded]"
+            }
             let mi = NSMenuItem(title: label, action: #selector(selectModelPreset(_:)), keyEquivalent: "")
             mi.target = self
             mi.representedObject = model.variant
             if isSelected && locked { mi.state = .on }
-            if mutationLocked || (!isSelected && locked) { mi.isEnabled = false }
+            if mutationLocked { mi.isEnabled = false }
             modelMenu.addItem(mi)
         }
 
-        if locked, let current {
-            modelMenu.addItem(NSMenuItem.separator())
-            let deleteItem = NSMenuItem(title: "Delete \(current.displayName) to switch models", action: #selector(deleteCurrentModel), keyEquivalent: "")
-            deleteItem.target = self
+        modelMenu.addItem(NSMenuItem.separator())
+        if comparisonTask != nil {
+            let cancelItem = NSMenuItem(title: "Cancel Model Comparison", action: #selector(cancelModelComparison), keyEquivalent: "")
+            cancelItem.target = self
+            modelMenu.addItem(cancelItem)
+        } else {
+            let title = lastDictationAudio == nil
+                ? "Compare Models (dictate something first)"
+                : "Compare Models on Last Dictation…"
+            let compareItem = NSMenuItem(title: title, action: #selector(compareModelsOnLastDictation), keyEquivalent: "")
+            compareItem.target = self
+            compareItem.isEnabled = locked && !mutationLocked && lastDictationAudio != nil
+            modelMenu.addItem(compareItem)
+        }
+
+        let installed = available.filter(\.isInstalled)
+        if !installed.isEmpty {
+            let deleteMenu = NSMenu()
+            deleteMenu.autoenablesItems = false
+            for model in installed {
+                let mi = NSMenuItem(title: "\(model.displayName) · \(model.sizeLabel)", action: #selector(deleteDownloadedModel(_:)), keyEquivalent: "")
+                mi.target = self
+                mi.representedObject = model.variant
+                mi.isEnabled = !mutationLocked
+                deleteMenu.addItem(mi)
+            }
+            let deleteItem = NSMenuItem(title: "Delete Downloaded Model", action: nil, keyEquivalent: "")
+            deleteItem.submenu = deleteMenu
             deleteItem.isEnabled = !mutationLocked
             modelMenu.addItem(deleteItem)
         }
@@ -803,7 +842,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         )
         let alert = NSAlert()
         alert.messageText = "Choose Voice Model"
-        alert.informativeText = "Choose the local model to install on this Mac. The download is about 470 MB, and the first prepare step may take a minute.\n\nScreen Recording is only requested when you first record a call."
+        alert.informativeText = "Choose the local model to install on this Mac. Its download size is shown next to it, and the first prepare step may take a minute. You can add and compare other models later from the Model menu.\n\nScreen Recording is only requested when you first record a call."
 
         let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 460, height: 26), pullsDown: false)
         for model in available {
@@ -1006,6 +1045,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func toggleDictation() {
         let now = Date()
+        if state == .idle, comparisonTask != nil {
+            lastDictationToggle = now
+            overlay.showInfo("Comparing models - cancel it in the Model menu")
+            return
+        }
         var hasModel = true
         if case .noModel = modelState { hasModel = false }
         switch Self.dictationToggleDecision(
@@ -1048,6 +1092,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             dictationSourceApp = NSWorkspace.shared.frontmostApplication?.localizedName
             dictationInjectionTarget = injector.captureTarget()
             transcriber.resetLanguageSession()
+            dictationAudioCapture = DictationAudioCapture()
             dictationTerminationGate.reset()
             dictationTerminationInProgress = false
             dictationPreparedForTermination = false
@@ -1091,6 +1136,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                         try? await Task.sleep(for: chunkWaitInterval)
                         continue
                     }
+                    self.dictationAudioCapture.append(samples, sampleRate: rate)
                     chunkIndex += 1
                     let idx = chunkIndex
                     self.dictationChunksDecoded = idx
@@ -1166,6 +1212,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 audio = nil
                 recorderStopError = error
             }
+            if let audio {
+                dictationAudioCapture.append(audio)
+            }
+            let comparisonAudio = dictationAudioCapture.snapshot
+            dictationAudioCapture = DictationAudioCapture()
 
             // #12: Store transcription task so it can be cancelled for discard
             transcriptionTask = Task {
@@ -1260,6 +1311,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 let hasText = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 var saved: URL?
                 var injection: InjectionResult?
+                if hasText, let comparisonAudio {
+                    self.lastDictationAudio = comparisonAudio
+                }
                 if hasText {
                     let currentApp = NSWorkspace.shared.frontmostApplication?.localizedName
                     saved = self.storage.saveDictation(
@@ -1368,6 +1422,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         switch state {
         case .idle:
+            guard comparisonTask == nil else {
+                overlay.showInfo("Comparing models - cancel it in the Model menu")
+                return
+            }
             guard ensureCaptureConfiguration() else { return }
             dictationSourceApp = NSWorkspace.shared.frontmostApplication?.localizedName
             transcriber.resetLanguageSession()
@@ -2293,7 +2351,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let submenu = NSMenu()
         let enabled = Self.runtimeMutationsAllowed(
             appState: state,
-            fileWorkActive: fileWorkActive
+            fileWorkActive: backgroundWorkActive
         )
         for mode in Self.compatibleLanguageModes(for: transcriber.selectedModel) {
             let menuItem = NSMenuItem(
@@ -2359,7 +2417,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func selectLanguage(_ sender: NSMenuItem) {
         guard Self.runtimeMutationsAllowed(
             appState: state,
-            fileWorkActive: fileWorkActive
+            fileWorkActive: backgroundWorkActive
         ) else {
             overlay.showInfo("Finish active transcription first")
             return
@@ -2586,6 +2644,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         preloadTask?.cancel()
         preloadTask = nil
         preloadTaskOwner = nil
+        comparisonTask?.cancel()
 
         // #12: Cancel any in-progress transcription
         transcriptionTask?.cancel()
@@ -2757,7 +2816,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func selectModelPreset(_ sender: NSMenuItem) {
         guard Self.runtimeMutationsAllowed(
             appState: state,
-            fileWorkActive: fileWorkActive
+            fileWorkActive: backgroundWorkActive
         ) else {
             overlay.showInfo("Finish active transcription first")
             return
@@ -2772,23 +2831,26 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Skip if already selected and active
         if model == transcriber.selectedModel && (modelReady || preloadTask != nil) { return }
 
-        // Confirm download
-        let alert = NSAlert()
-        alert.messageText = "Download \(model.displayName)?"
-        var info = "This will download \(model.sizeLabel) to your Mac. Needs \(model.ramRequirementLabel). The first prepare step may take a minute."
-        if let hint = model.onboardingHint {
-            info += "\n\n\(hint)."
-        }
-        alert.informativeText = info
-        alert.addButton(withTitle: "Download")
-        alert.addButton(withTitle: "Cancel")
+        // A downloaded model is a switch; only a download needs a yes.
+        let installed = model.isInstalled
+        if !installed {
+            let alert = NSAlert()
+            alert.messageText = "Download \(model.displayName)?"
+            var info = "This will download \(model.sizeLabel) to your Mac. Needs \(model.ramRequirementLabel). The first prepare step may take a minute."
+            if let hint = model.onboardingHint {
+                info += "\n\n\(hint)."
+            }
+            alert.informativeText = info
+            alert.addButton(withTitle: "Download")
+            alert.addButton(withTitle: "Cancel")
 
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
         // Commit-time guard for the modal nested event loop. A hotkey event may
         // have started live capture after the menu action was accepted.
         guard Self.runtimeMutationsAllowed(
             appState: state,
-            fileWorkActive: fileWorkActive
+            fileWorkActive: backgroundWorkActive
         ) else {
             overlay.showInfo("Finish active transcription first")
             return
@@ -2801,8 +2863,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         transcriber.selectModel(model)
         normalizeLanguageModeForSelectedModel(persist: true, announce: true)
-        modelState = .downloading(model, 0)
-        beginModelSetupPill(mode: .downloading, status: "Voice model...")
+        if installed {
+            modelState = .preparing(model)
+            beginModelSetupPill(mode: .loading, status: nil)
+        } else {
+            modelState = .downloading(model, 0)
+            beginModelSetupPill(mode: .downloading, status: "Voice model...")
+        }
 
         preloadTask?.cancel()
         let preloadOwner = UUID()
@@ -2812,9 +2879,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             do {
                 try await transcriber.preloadModel()
                 self.modelState = .ready(model)
-                self.overlay.finish(.silent, of: self.modelSetupOverlaySession)
+                self.overlay.finish(
+                    installed ? .info("\(model.displayName) ready") : .silent,
+                    of: self.modelSetupOverlaySession
+                )
                 self.modelSetupOverlaySession = nil
-                self.showReadyNotification()
+                if !installed {
+                    self.showReadyNotification()
+                }
             } catch {
                 guard !Task.isCancelled else { return }
                 let msg = Self.classifyModelError(error)
@@ -2829,7 +2901,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func deleteCurrentModel() {
         guard Self.runtimeMutationsAllowed(
             appState: state,
-            fileWorkActive: fileWorkActive
+            fileWorkActive: backgroundWorkActive
         ) else {
             overlay.showInfo("Finish active transcription first")
             return
@@ -2847,7 +2919,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // capture while the confirmation is open, so re-check at commit time.
         guard Self.runtimeMutationsAllowed(
             appState: state,
-            fileWorkActive: fileWorkActive
+            fileWorkActive: backgroundWorkActive
         ) else {
             overlay.showInfo("Finish active transcription first")
             return
@@ -2859,11 +2931,142 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         )
     }
 
+    /// Delete a downloaded model from the Delete Downloaded Model submenu.
+    /// The selected model goes through `deleteCurrentModel`, which unloads it
+    /// first; any other one is not loaded and its folder can simply go.
+    @objc func deleteDownloadedModel(_ sender: NSMenuItem) {
+        guard let variant = sender.representedObject as? String,
+              let model = WhisperModel.all.first(where: { $0.variant == variant })
+        else { return }
+        if model == transcriber.selectedModel {
+            deleteCurrentModel()
+            return
+        }
+        guard Self.runtimeMutationsAllowed(
+            appState: state,
+            fileWorkActive: backgroundWorkActive
+        ) else {
+            overlay.showInfo("Finish active transcription first")
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "Delete \(model.displayName)?"
+        alert.informativeText = "This will free \(model.sizeLabel) of disk space. You can download it again from the Model menu."
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard Self.runtimeMutationsAllowed(
+            appState: state,
+            fileWorkActive: backgroundWorkActive
+        ) else {
+            overlay.showInfo("Finish active transcription first")
+            return
+        }
+        model.removeFromDisk()
+        rebuildModelSubmenu()
+        overlay.showInfo("\(model.displayName) deleted")
+    }
+
+    // MARK: - Model comparison
+
+    /// The selected model first, then every other downloaded model this Mac
+    /// can run. Models that are not downloaded are left out: a comparison
+    /// never starts a download.
+    private func comparisonModels() -> [WhisperModel] {
+        let current = transcriber.selectedModel
+        let others = Self.availableModels(
+            from: WhisperModel.available(),
+            operatingSystemVersion: ProcessInfo.processInfo.operatingSystemVersion
+        ).filter { $0 != current && $0.isInstalled }
+        return [current] + others
+    }
+
+    @objc func compareModelsOnLastDictation() {
+        if comparisonTask != nil {
+            comparisonWindow?.show()
+            return
+        }
+        guard modelReady,
+              Self.runtimeMutationsAllowed(appState: state, fileWorkActive: backgroundWorkActive)
+        else {
+            overlay.showInfo("Finish active transcription first")
+            return
+        }
+        guard let audio = lastDictationAudio else {
+            overlay.showInfo("Dictate something first")
+            return
+        }
+        let models = comparisonModels()
+        let language = transcriber.preferredLanguage
+        let date = Date()
+
+        comparisonWindow?.onClose = nil
+        comparisonWindow?.close()
+        let window = ModelComparisonWindowController(title: "Model Comparison")
+        comparisonWindow = window
+        window.onClose = { [weak self] in self?.comparisonTask?.cancel() }
+        window.update(
+            report: ModelComparisonReport.markdown(
+                date: date,
+                audioSeconds: audio.duration,
+                requestedLanguage: language,
+                results: [],
+                waiting: models
+            ),
+            status: "Comparing \(models.count) models…"
+        )
+        window.show()
+
+        comparisonTask = Task { [weak self] in
+            guard let self else { return }
+            let results = await ModelComparisonRunner.run(
+                audio: audio,
+                models: models,
+                transcriber: self.transcriber,
+                language: language
+            ) { running, results in
+                let waiting = models.filter { model in
+                    model != running && !results.contains { $0.model == model }
+                }
+                window.update(
+                    report: ModelComparisonReport.markdown(
+                        date: date,
+                        audioSeconds: audio.duration,
+                        requestedLanguage: language,
+                        results: results,
+                        running: running,
+                        waiting: waiting
+                    ),
+                    status: running.map { "Running \($0.displayName)…" } ?? "Done"
+                )
+            }
+            let cancelled = Task.isCancelled
+            self.comparisonTask = nil
+            self.refreshRuntimeMutationMenus()
+            let report = ModelComparisonReport.markdown(
+                date: date,
+                audioSeconds: audio.duration,
+                requestedLanguage: language,
+                results: results
+            )
+            if cancelled {
+                window.update(report: report, status: "Cancelled")
+            } else {
+                window.finish(report: report, savedURL: ModelComparisonStore.save(report, date: date))
+            }
+        }
+        refreshRuntimeMutationMenus()
+    }
+
+    @objc func cancelModelComparison() {
+        comparisonTask?.cancel()
+    }
+
     // #25: Re-trigger onboarding setup wizard
     @objc func runSetupWizard() {
         guard Self.runtimeMutationsAllowed(
             appState: state,
-            fileWorkActive: fileWorkActive
+            fileWorkActive: backgroundWorkActive
         ) else {
             overlay.showInfo("Finish active transcription first")
             return
@@ -2921,7 +3124,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func cancelModelDownload() {
         guard Self.runtimeMutationsAllowed(
             appState: state,
-            fileWorkActive: fileWorkActive
+            fileWorkActive: backgroundWorkActive
         ) else {
             overlay.showInfo("Finish active transcription first")
             return
@@ -3784,6 +3987,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             appState: state
         ) else {
             overlay.showError(modelReady ? "Finish active recording first" : "Model not ready")
+            return
+        }
+        guard comparisonTask == nil else {
+            overlay.showInfo("Comparing models - cancel it in the Model menu")
             return
         }
         guard let wiring = Self.fileTranscriptionRuntimeWiring(for: transcriber) else {
