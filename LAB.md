@@ -40,6 +40,14 @@
 
 У обоих приложений по умолчанию одна горячая клавиша Option+Space. Пока тестируете Lab, выйдите из официального Voicely или смените хоткей в одном из них.
 
+## Готовая сборка
+
+Xcode не нужен: скачайте `Voicely-Lab.zip` из [последнего релиза](https://github.com/hackhappy/Voicely/releases/latest) (Mac на Apple Silicon, macOS 14+), распакуйте и перенесите «Voicely Lab» в «Программы». Сборка подписана ad-hoc, без Apple ID разработчика. Поэтому macOS не даст открыть скачанное приложение, пока с него не снята пометка «скачано из интернета»:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/Voicely Lab.app"
+```
+
 ## Сборка
 
 Нужен Xcode. Из корня репозитория:
@@ -55,6 +63,19 @@ scripts/make-lab-app.sh
 ```bash
 swift test
 ```
+
+## Релиз
+
+Версия задаётся в одном месте: `CFBundleShortVersionString` в `Sources/Voicely/Resources/Info.plist`, в виде `<версия Voicely>-lab.<N>`. Поднимите её, закоммитьте и выполните:
+
+```bash
+V=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Sources/Voicely/Resources/Info.plist)
+scripts/make-lab-app.sh && ditto -c -k --keepParent ".build/lab/Voicely Lab.app" .build/lab/Voicely-Lab.zip
+git tag "v$V" && git push origin HEAD "v$V"
+gh release create "v$V" .build/lab/Voicely-Lab.zip -R hackhappy/Voicely --title "Voicely Lab $V" --notes-file <файл с описанием>
+```
+
+Имя файла в релизе всегда `Voicely-Lab.zip`: по ссылке `releases/latest/download/Voicely-Lab.zip` его скачивают скрипты.
 
 ## Как откатить
 

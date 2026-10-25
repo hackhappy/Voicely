@@ -23,6 +23,7 @@ for bundle in "$BUILD"/*.bundle; do
   [ -e "$bundle" ] && cp -R "$bundle" "$APP/Contents/Resources/"
 done
 cp Sources/Voicely/Resources/Info.plist "$APP/Contents/Info.plist"
+cp LICENSE "$APP/Contents/Resources/"  # MIT: notice travels with every copy of the binary
 
 ICON=/Applications/Voicely.app/Contents/Resources/AppIcon.icns
 # Without the official Voicely installed, reuse the icon of the installed Lab.
