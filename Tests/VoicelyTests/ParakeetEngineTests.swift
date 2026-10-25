@@ -53,3 +53,44 @@ final class ParakeetSegmentingTests: XCTestCase {
         XCTAssertTrue(ParakeetEngine.makeSegments(words: [], fallbackText: "", duration: 5).isEmpty)
     }
 }
+
+final class ParakeetVocabularyTests: XCTestCase {
+    private func word(_ text: String, _ start: Double, _ end: Double) -> WordTiming {
+        WordTiming(word: text, startTime: start, endTime: end)
+    }
+
+    /// Replacements land in the word timings the segments are built from,
+    /// in order, keeping the original's trailing punctuation.
+    func testReplacementsLandInWordTimingsInOrder() {
+        let words = [
+            word("база", 0.0, 0.3), word("рак,", 0.4, 0.7), word("и", 0.8, 0.9),
+            word("ещё", 1.0, 1.2), word("рак.", 1.3, 1.6),
+        ]
+        let out = ParakeetEngine.applying(
+            [(original: "рак", replacement: "RAG"), (original: "рак", replacement: "RAG")], to: words)
+        XCTAssertEqual(out.map(\.word), ["база", "RAG,", "и", "ещё", "RAG."])
+        XCTAssertEqual(out[1].startTime, 0.4)
+        XCTAssertEqual(out[4].endTime, 1.6)
+    }
+
+    /// A multi-word mishearing collapses into one term spanning its timings.
+    func testMultiWordOriginalCollapsesIntoOneWord() {
+        let words = [word("в", 0.0, 0.1), word("кубер", 0.2, 0.5), word("нетис", 0.5, 0.9), word("деплоим", 1.0, 1.5)]
+        let out = ParakeetEngine.applying([(original: "кубер нетис", replacement: "Kubernetes")], to: words)
+        XCTAssertEqual(out.map(\.word), ["в", "Kubernetes", "деплоим"])
+        XCTAssertEqual(out[1].startTime, 0.2)
+        XCTAssertEqual(out[1].endTime, 0.9)
+    }
+
+    /// A replacement whose original is not among the words changes nothing.
+    func testUnmatchedReplacementIsIgnored() {
+        let words = [word("всё", 0.0, 0.3), word("ок", 0.4, 0.6)]
+        let out = ParakeetEngine.applying([(original: "рак", replacement: "RAG")], to: words)
+        XCTAssertEqual(out.map(\.word), ["всё", "ок"])
+    }
+
+    func testNoVocabularyWithoutEnvironmentVariable() async throws {
+        let session = try await ParakeetEngine.loadVocabularyBoosting(environment: [:])
+        XCTAssertNil(session)
+    }
+}

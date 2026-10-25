@@ -16,6 +16,17 @@ import Foundation
 // The Parakeet TDT 0.6B v3 weights are NVIDIA's, converted to CoreML by
 // FluidInference (parakeet-tdt-0.6b-v3-coreml). CC-BY-4.0 requires
 // attribution: the "About" window MUST credit NVIDIA Parakeet.
+// Parakeet Ultra is moondream's CC-BY-4.0 post-training of those weights
+// (FluidInference/parakeet-ultra-coreml): credit moondream as well.
+
+/// Custom vocabulary (FluidAudio vocabulary boosting) for Parakeet: when this
+/// environment variable names a term file, a CTC keyword spotter rescores each
+/// transcript so listed terms come out spelled right. One term per line,
+/// optionally "Term: alias1, alias2" (aliases are the model's usual mishearings).
+/// The CLI sets it from `--vocabulary`.
+public enum ParakeetVocabulary {
+    public static let environmentKey = "VOICELY_VOCABULARY"
+}
 
 private enum ParakeetConstants {
     /// Same silence gate as the GigaAM engines: a dictation of pure silence
@@ -40,6 +51,7 @@ final class ParakeetEngine: @unchecked Sendable, TranscriberEngine, SampleTransc
     private let requestCancellation = GigaAMRequestCancellation()
 
     private var manager: AsrManager?
+    private var vocabularyBoosting: VocabularyBoostingSession?
     private var isLoading = false
     private var isDownloadInProgress = false
     private var activeLoadTask: Task<AsrManager, Error>?
@@ -126,15 +138,62 @@ final class ParakeetEngine: @unchecked Sendable, TranscriberEngine, SampleTransc
         }
         try checkCancellation(cancellationToken)
 
-        let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        var text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !Transcriber.isHallucinationText(text) else {
             return WhisperTranscription(text: "", segments: [], detectedLanguage: nil)
         }
 
-        let words = buildWordTimings(from: result.tokenTimings ?? [])
+        var words = buildWordTimings(from: result.tokenTimings ?? [])
+        if let boosting = currentVocabularyBoosting(),
+           let rescored = await boosting.rescore(
+               text: result.text, tokenTimings: result.tokenTimings ?? [], audioSamples: samples)
+        {
+            text = rescored.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            // Segments are built from word timings, not from `text`, so the
+            // replacements have to land there too.
+            let pairs = rescored.replacements.compactMap { result in
+                result.shouldReplace
+                    ? result.replacementWord.map { (original: result.originalWord, replacement: $0) } : nil
+            }
+            words = Self.applying(pairs, to: words)
+        }
         let duration = Double(samples.count) / 16000.0
         let segments = Self.makeSegments(words: words, fallbackText: text, duration: duration)
         return WhisperTranscription(text: text, segments: segments, detectedLanguage: nil)
+    }
+
+    // MARK: - Vocabulary replacements
+
+    /// Apply vocabulary replacements to word timings. Replacements carry only
+    /// the original and replacement words, in transcript order, so each one is
+    /// matched at the next occurrence after the previous match. A multi-word
+    /// original collapses into one word spanning its timings; trailing
+    /// punctuation of the original is kept.
+    static func applying(
+        _ replacements: [(original: String, replacement: String)],
+        to words: [WordTiming]
+    ) -> [WordTiming] {
+        func key(_ word: some StringProtocol) -> String {
+            word.lowercased().trimmingCharacters(in: .punctuationCharacters.union(.whitespaces))
+        }
+        var out = words
+        var cursor = 0
+        for (originalText, newWord) in replacements where !newWord.isEmpty {
+            let original = originalText.split(separator: " ").map { key($0) }
+            guard !original.isEmpty, cursor <= out.count - original.count else { continue }
+            guard let at = (cursor...(out.count - original.count)).first(where: { start in
+                original.indices.allSatisfy { key(out[start + $0].word) == original[$0] }
+            }) else { continue }
+            let first = out[at], last = out[at + original.count - 1]
+            let trailing = newWord.last?.isPunctuation == true
+                ? "" : String(last.word.reversed().prefix(while: \.isPunctuation).reversed())
+            out.replaceSubrange(
+                at..<(at + original.count),
+                with: [WordTiming(word: newWord + trailing, startTime: first.startTime, endTime: last.endTime)]
+            )
+            cursor = at + 1
+        }
+        return out
     }
 
     // MARK: - Segmenting word timings
@@ -248,7 +307,7 @@ final class ParakeetEngine: @unchecked Sendable, TranscriberEngine, SampleTransc
         do {
             models = try await AsrModels.downloadAndLoad(
                 to: model.modelDirectory,
-                version: .v3,
+                version: model.backend == .parakeetUltra ? .ultra : .v3,
                 progressHandler: { progress in
                     switch progress.phase {
                     case .compiling:
@@ -267,8 +326,32 @@ final class ParakeetEngine: @unchecked Sendable, TranscriberEngine, SampleTransc
         onProgress?(.loadingModel)
         let manager = AsrManager(config: .default)
         try await manager.loadModels(models)
+        engine.setVocabularyBoosting(try await loadVocabularyBoosting())
         return manager
     }
+
+    /// The vocabulary session named by `ParakeetVocabulary.environmentKey`, or
+    /// nil when unset. A set but unreadable file fails the load: whoever asked
+    /// for the vocabulary must not get a silent run without it.
+    static func loadVocabularyBoosting(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) async throws -> VocabularyBoostingSession? {
+        guard let path = environment[ParakeetVocabulary.environmentKey], !path.isEmpty else { return nil }
+        let (vocabulary, ctcModels) = try await CustomVocabularyContext.loadWithCtcTokens(from: path)
+        vlog("Parakeet: vocabulary boosting with \(vocabulary.terms.count) term(s) from \(path)")
+        return try await VocabularyBoostingSession(
+            vocabulary: vocabulary, ctcModels: ctcModels, config: vocabularyRescorerConfig)
+    }
+
+    /// The CTC spotter is an English model. On Russian speech its acoustic
+    /// rescue replaced common short words regardless of spelling ("так",
+    /// "как" → "RAG": 151 replacements, nearly all false, on a 38-minute call,
+    /// 2026-10-25). Without it a word is replaced only when it resembles a term
+    /// or one of its aliases; short terms also get a reduced boost.
+    static let vocabularyRescorerConfig = VocabularyRescorer.Config(
+        shortTermCbwTaperPivot: 5,
+        spotterRescueEnabled: false
+    )
 
     // MARK: - Locked state
 
@@ -313,6 +396,18 @@ final class ParakeetEngine: @unchecked Sendable, TranscriberEngine, SampleTransc
         isLoading = false
         isDownloadInProgress = false
         activeLoadTask = nil
+        stateLock.unlock()
+    }
+
+    private func currentVocabularyBoosting() -> VocabularyBoostingSession? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return vocabularyBoosting
+    }
+
+    private func setVocabularyBoosting(_ session: VocabularyBoostingSession?) {
+        stateLock.lock()
+        vocabularyBoosting = session
         stateLock.unlock()
     }
 

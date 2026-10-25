@@ -50,13 +50,24 @@ struct Transcribe: AsyncParsableCommand {
     @Flag(name: .long, help: "Also save the transcript into ~/Documents/Voicely/files.")
     var save = false
 
-    @Option(name: .long, help: "Whisper model variant (default: RAM-based recommendation).")
+    @Option(name: .long, help: "Model variant, e.g. parakeet-tdt-0.6b-v3 or parakeet-ultra (default: saved selection or RAM-based recommendation).")
     var model: String?
+
+    @Option(name: .long, help: "Vocabulary file for Parakeet: one term per line, optionally 'Term: alias1, alias2'.")
+    var vocabulary: String?
 
     func run() async throws {
         let fileURL = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
             throw ValidationError("File not found: \(fileURL.path)")
+        }
+        if let vocabulary {
+            let vocabularyURL = URL(fileURLWithPath: (vocabulary as NSString).expandingTildeInPath)
+            guard FileManager.default.fileExists(atPath: vocabularyURL.path) else {
+                throw ValidationError("Vocabulary file not found: \(vocabularyURL.path)")
+            }
+            // The engine reads it at model load; see ParakeetVocabulary.
+            setenv(ParakeetVocabulary.environmentKey, vocabularyURL.path, 1)
         }
 
         let job = TranscribeJob(

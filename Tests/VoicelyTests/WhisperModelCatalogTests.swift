@@ -9,6 +9,7 @@ final class WhisperModelCatalogTests: XCTestCase {
             WhisperModel.all.map(\.variant),
             [
                 "parakeet-tdt-0.6b-v3",
+                "parakeet-ultra",
                 "gigaam-v3-e2e-rnnt",
                 "gigaam-multilingual-ctc",
                 "large-v3-v20240930_turbo_632MB",
@@ -21,6 +22,7 @@ final class WhisperModelCatalogTests: XCTestCase {
     func testAvailabilityFollowsRAMThresholds() {
         let light = [
             "parakeet-tdt-0.6b-v3",
+            "parakeet-ultra",
             "gigaam-v3-e2e-rnnt",
             "gigaam-multilingual-ctc",
             "large-v3-v20240930_turbo_632MB",
@@ -89,6 +91,20 @@ final class WhisperModelCatalogTests: XCTestCase {
         XCTAssertNotNil(parakeet.requestValidationError(translateToEnglish: false, language: "ja"))
         XCTAssertNil(parakeet.requestValidationError(translateToEnglish: false, language: "de"))
         XCTAssertNil(parakeet.requestValidationError(translateToEnglish: false, language: "ru"))
+    }
+
+    /// Ultra is v3 with other weights: same languages and requests, its own
+    /// folder next to v3 (where FluidAudio's `.ultra` download lands).
+    func testParakeetUltraMatchesV3ButHasItsOwnFolder() throws {
+        let v3 = try XCTUnwrap(WhisperModel.all.first { $0.backend == .parakeetTDTV3 })
+        let ultra = try XCTUnwrap(WhisperModel.all.first { $0.backend == .parakeetUltra })
+        XCTAssertEqual(ultra.capabilities, v3.capabilities)
+        XCTAssertEqual(ultra.modelDirectory.lastPathComponent, "parakeet-ultra")
+        XCTAssertEqual(
+            ultra.modelDirectory.deletingLastPathComponent(),
+            v3.modelDirectory.deletingLastPathComponent()
+        )
+        XCTAssertTrue(ultra.userFacingLabel(isRecommended: false).contains("Most accurate"))
     }
 
     func testParakeetLabelStatesSpeedAndCoverage() throws {
