@@ -1,0 +1,85 @@
+# Voicely Lab
+
+Форк Voicely для подбора модели распознавания. Ставится рядом с официальным Voicely и его не трогает.
+
+## Что добавлено
+
+- **Семь моделей вместо одной** — линейка из Voicely 1.2.0 и Parakeet Ultra:
+
+  | Модель | Размер | Языки | Нужно |
+  | --- | --- | --- | --- |
+  | Parakeet V3 | ~470 МБ | 25 европейских | 8 ГБ RAM |
+  | Parakeet Ultra | ~630 МБ | 25 европейских | 8 ГБ RAM |
+  | GigaAM V3 RU | ~426 МБ | только русский | 8 ГБ RAM, macOS 15 |
+  | GigaAM Multilingual | ~421 МБ | RU, EN, KK, KY, UZ | 8 ГБ RAM, macOS 15 |
+  | Large V3 Turbo Q (Whisper) | ~632 МБ | любой, умеет перевод на английский | 8 ГБ RAM |
+  | Medium (Whisper) | ~1,5 ГБ | любой | 16 ГБ RAM |
+  | Large V3 Turbo (Whisper) | ~3 ГБ | любой | 24 ГБ RAM |
+
+  Модели, которым не хватает памяти или версии macOS, в меню не показываются.
+
+- **Переключение без удаления.** В меню **Model** все модели доступны всегда. Скачанная помечена `[downloaded]`, и выбор просто переключает на неё. Если модель ещё не скачана, приложение сначала спросит. Ненужную модель можно удалить в **Model → Delete Downloaded Model**.
+
+- **Сравнение на последней диктовке.** Пункт **Model → Compare Models on Last Dictation…** прогоняет последнюю запись через все скачанные модели по очереди, начиная с текущей. Каждая модель распознаёт запись так же, как при обычной диктовке. В окне — таблица со временем загрузки и распознавания, скоростью (во сколько раз быстрее реального времени) и текстом каждой модели. Отчёт сохраняется в `~/Documents/Voicely/comparisons/`.
+  - Аудио последней диктовки хранится только в памяти и заменяется следующей диктовкой.
+  - Сравнение никогда ничего не скачивает: модели, которых нет на диске, пропускаются.
+  - Пока идёт сравнение, диктовка, звонки и смена модели недоступны. Отменить сравнение можно в меню Model или закрыв окно.
+  - Первая загрузка модели на этом Mac включает подготовку CoreML и может занять минуту. При повторных сравнениях загрузка быстрее.
+
+- **Parakeet Ultra** — доработанная Moondream версия Parakeet V3 (FluidAudio 0.17.3+, лицензия CC-BY-4.0): те же языки и скорость, точнее. На наших звонках расхождение с GigaAM и Whisper примерно на 2 пункта меньше, чем у V3 (замеры 25.10.2026).
+
+- **Консольная утилита внутри приложения:** `/Applications/Voicely Lab.app/Contents/Helpers/voicely`, как у официального Voicely. Дополнительно:
+  - `--model parakeet-ultra` (или любой вариант из таблицы) — модель указывается явно, иначе берётся выбранная в Lab;
+  - `--vocabulary <файл>` — подсказка словаря для Parakeet: термины, которые модель должна писать правильно (RAG, Kubernetes, Claude…). Тот же файл можно задать переменной `VOICELY_VOCABULARY`. Для русской речи используйте JSON с порогом сходства, например `{"minSimilarity": 0.9, "terms": [{"text": "RAG", "aliases": ["рак", "рагом"]}]}`: вспомогательная CTC-модель английская, и с короткими вариантами без порога она путает «так» и «как» с RAG.
+
+## Чем Lab отличается от официального Voicely
+
+- bundle id `art.voicely.lab`, имя «Voicely Lab»;
+- свои настройки (`defaults read art.voicely.lab`) и своя папка восстановления (`~/Library/Application Support/Voicely Lab`);
+- **общие** файлы моделей (`~/Documents/voicely/models`, `~/Documents/huggingface/models`) и папка расшифровок `~/Documents/Voicely`: уже скачанный Parakeet заново не качается.
+
+У обоих приложений по умолчанию одна горячая клавиша Option+Space. Пока тестируете Lab, выйдите из официального Voicely или смените хоткей в одном из них.
+
+## Готовая сборка
+
+Xcode не нужен: скачайте `Voicely-Lab.zip` из [последнего релиза](https://github.com/hackhappy/Voicely/releases/latest) (Mac на Apple Silicon, macOS 14+), распакуйте и перенесите «Voicely Lab» в «Программы». Сборка подписана ad-hoc, без Apple ID разработчика. Поэтому macOS не даст открыть скачанное приложение, пока с него не снята пометка «скачано из интернета»:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/Voicely Lab.app"
+```
+
+## Сборка
+
+Нужен Xcode. Из корня репозитория:
+
+```bash
+scripts/make-lab-app.sh
+```
+
+Готовое приложение появится в `.build/lab/Voicely Lab.app`, вместе с консольной утилитой в `Contents/Helpers/voicely`. Перенесите его в `/Applications` и запустите. Приложение подписано ad-hoc, поэтому после каждой пересборки macOS заново спросит доступ к Микрофону и Accessibility.
+
+Тесты:
+
+```bash
+swift test
+```
+
+## Релиз
+
+Версия задаётся в одном месте: `CFBundleShortVersionString` в `Sources/Voicely/Resources/Info.plist`, в виде `<версия Voicely>-lab.<N>`. Поднимите её, закоммитьте и выполните:
+
+```bash
+V=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Sources/Voicely/Resources/Info.plist)
+scripts/make-lab-app.sh && ditto -c -k --keepParent ".build/lab/Voicely Lab.app" .build/lab/Voicely-Lab.zip
+git tag "v$V" && git push origin HEAD "v$V"
+gh release create "v$V" .build/lab/Voicely-Lab.zip -R hackhappy/Voicely --title "Voicely Lab $V" --notes-file <файл с описанием>
+```
+
+Имя файла в релизе всегда `Voicely-Lab.zip`: по ссылке `releases/latest/download/Voicely-Lab.zip` его скачивают скрипты.
+
+## Как откатить
+
+- удалить `Voicely Lab.app`;
+- настройки: `defaults delete art.voicely.lab`;
+- лишние модели: удалить в меню Lab или вручную из папок выше (Parakeet оставить, им пользуется официальный Voicely);
+- отчёты сравнений: `~/Documents/Voicely/comparisons`.

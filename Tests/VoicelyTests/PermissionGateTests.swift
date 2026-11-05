@@ -277,10 +277,14 @@ final class PermissionGateTests: XCTestCase {
     }
 
     func testOnlyVoicelysOwnIdentityIsEverReset() {
-        XCTAssertEqual(MacPermissionSystem.resettableIdentity("art.voicely.app"), "art.voicely.app")
+        XCTAssertEqual(MacPermissionSystem.resettableIdentity("art.voicely.lab"), "art.voicely.lab")
+        XCTAssertNil(
+            MacPermissionSystem.resettableIdentity("art.voicely.app"),
+            "Voicely Lab never resets the official Voicely's grants"
+        )
         XCTAssertNil(MacPermissionSystem.resettableIdentity(nil), "unbundled runs reset nothing")
         XCTAssertNil(MacPermissionSystem.resettableIdentity("com.apple.dt.xctest.tool"))
-        XCTAssertNil(MacPermissionSystem.resettableIdentity("art.voicely.appx"))
+        XCTAssertNil(MacPermissionSystem.resettableIdentity("art.voicely.labx"))
     }
 }
 

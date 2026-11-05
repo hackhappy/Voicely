@@ -240,7 +240,7 @@ final class MacPermissionSystem: PermissionSystem {
     /// The one identity whose entries Voicely may clear: its own. Unbundled
     /// runs (swift run, tests) have none and must never reset anything.
     nonisolated static func resettableIdentity(_ bundleIdentifier: String?) -> String? {
-        bundleIdentifier == "art.voicely.app" ? bundleIdentifier : nil
+        bundleIdentifier == "art.voicely.lab" ? bundleIdentifier : nil
     }
 
     func clearOwnEntry(_ service: PrivacyService) async {

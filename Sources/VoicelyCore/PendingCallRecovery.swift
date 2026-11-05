@@ -300,8 +300,9 @@ public final class PendingCallRecoveryStore: @unchecked Sendable {
             in: .userDomainMask
         ).first ?? FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support", isDirectory: true)
+        // Voicely Lab's own folder, as for pending dictations.
         return support
-            .appendingPathComponent("Voicely", isDirectory: true)
+            .appendingPathComponent("Voicely Lab", isDirectory: true)
             .appendingPathComponent("PendingCalls", isDirectory: true)
     }
 
